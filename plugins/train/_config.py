@@ -3,12 +3,8 @@
 
 import logging
 import os
-import sys
-
-from importlib import import_module
 
 from lib.config import FaceswapConfig
-from lib.utils import full_path_split
 from plugins.plugin_loader import PluginLoader
 
 logger = logging.getLogger(__name__)  # pylint: disable=invalid-name
@@ -25,16 +21,7 @@ class Config(FaceswapConfig):
         logger.debug("Setting defaults")
         self._set_globals()
         self._set_loss()
-        current_dir = os.path.dirname(__file__)
-        for dirpath, _, filenames in os.walk(current_dir):
-            default_files = [fname for fname in filenames if fname.endswith("_defaults.py")]
-            if not default_files:
-                continue
-            base_path = os.path.dirname(os.path.realpath(sys.argv[0]))
-            import_path = ".".join(full_path_split(dirpath.replace(base_path, ""))[1:])
-            plugin_type = import_path.split(".")[-1]
-            for filename in default_files:
-                self.load_module(filename, import_path, plugin_type)
+        self._defaults_from_plugin(os.path.dirname(__file__))
 
     def _set_globals(self):
         """ Set the global options for training """
@@ -44,9 +31,32 @@ class Config(FaceswapConfig):
                          info="Options that apply to all models" + ADDITIONAL_INFO)
         self.add_item(
             section=section,
+            title="centering",
+            datatype=str,
+            gui_radio=True,
+            default="face",
+            choices=["face", "head", "legacy"],
+            fixed=True,
+            group="face",
+            info="How to center the training image. The extracted images are centered on the "
+                 "middle of the skull based on the face's estimated pose. A subsection of these "
+                 "images are used for training. The centering used dictates how this subsection "
+                 "will be cropped from the aligned images."
+                 "\n\tface: Centers the training image on the center of the face, adjusting for "
+                 "pitch and yaw."
+                 "\n\thead: Centers the training image on the center of the head, adjusting for "
+                 "pitch and yaw. NB: You should only select head centering if you intend to "
+                 "include the full head (including hair) in the final swap. This may give mixed "
+                 "results. Additionally, it is only worth choosing head centering if you are "
+                 "training with a mask that includes the hair (e.g. BiSeNet-FP-Head)."
+                 "\n\tlegacy: The 'original' extraction technique. Centers the training image "
+                 "near the tip of the nose with no adjustment. Can result in the edges of the "
+                 "face appearing outside of the training area.")
+        self.add_item(
+            section=section,
             title="coverage",
             datatype=float,
-            default=68.75,
+            default=87.5,
             min_max=(62.5, 100.0),
             rounding=2,
             fixed=True,
@@ -54,12 +64,14 @@ class Config(FaceswapConfig):
             info="How much of the extracted image to train on. A lower coverage will limit the "
                  "model's scope to a zoomed-in central area while higher amounts can include the "
                  "entire face. A trade-off exists between lower amounts given more detail "
-                 "versus higher amounts avoiding noticeable swap transitions. Sensible values to "
-                 "use are:"
-                 "\n\t62.5%% spans from eyebrow to eyebrow."
-                 "\n\t75.0%% spans from temple to temple."
-                 "\n\t87.5%% spans from ear to ear."
-                 "\n\t100.0%% is a mugshot.")
+                 "versus higher amounts avoiding noticeable swap transitions. For 'Face' "
+                 "centering you will want to leave this above 75%. For Head centering you will "
+                 "most likely want to set this to 100%. Sensible values for 'Legacy' "
+                 "centering are:"
+                 "\n\t62.5% spans from eyebrow to eyebrow."
+                 "\n\t75.0% spans from temple to temple."
+                 "\n\t87.5% spans from ear to ear."
+                 "\n\t100.0% is a mugshot.")
 
         self.add_item(
             section=section,
@@ -96,13 +108,18 @@ class Config(FaceswapConfig):
             gui_radio=True,
             group="optimizer",
             default="adam",
-            choices=["adam", "nadam", "rms-prop"],
+            choices=["adabelief", "adam", "nadam", "rms-prop"],
             info="The optimizer to use."
+                 "\n\t adabelief - Adapting Stepsizes by the Belief in Observed Gradients. An "
+                 "optimizer with the aim to converge faster, generalize better and remain more "
+                 "stable. (https://arxiv.org/abs/2010.07468). NB: Epsilon for AdaBelief needs to "
+                 "be set to a smaller value than other Optimizers. Generally setting the 'Epsilon "
+                 "Exponent' to around '-16' should work."
                  "\n\t adam - Adaptive Moment Optimization. A stochastic gradient descent method "
                  "that is based on adaptive estimation of first-order and second-order moments."
                  "\n\t nadam - Adaptive Moment Optimization with Nesterov Momentum. Much like "
                  "Adam but uses a different formula for calculating momentum."
-                 "\n\t rms-prop - Root Mean Square Propogation. Maintains a moving (discounted) "
+                 "\n\t rms-prop - Root Mean Square Propagation. Maintains a moving (discounted) "
                  "average of the square of the gradients. Divides the gradient by the root of "
                  "this average.")
         self.add_item(
@@ -119,6 +136,27 @@ class Config(FaceswapConfig):
                  "are too large might result in model crashes and the inability of the model to "
                  "find the best solution. Values that are too small might be unable to escape "
                  "from dead-ends and find the best global minimum.")
+        self.add_item(
+            section=section,
+            title="epsilon_exponent",
+            datatype=int,
+            default=-7,
+            min_max=(-20, 0),
+            rounding=1,
+            fixed=False,
+            group="optimizer",
+            info="The epsilon adds a small constant to weight updates to attempt to avoid 'divide "
+                 "by zero' errors. Unless you are using the AdaBelief Optimizer, then Generally "
+                 "this option should be left at default value, For AdaBelief, setting this to "
+                 "around '-16' should work.\n"
+                 "In all instances if you are getting 'NaN' loss values, and have been unable to "
+                 "resolve the issue any other way (for example, increasing batch size, or "
+                 "lowering learning rate), then raising the epsilon can lead to a more stable "
+                 "model. It may, however, come at the cost of slower training and a less accurate "
+                 "final result.\n"
+                 "NB: The value given here is the 'exponent' to the epsilon. For example, "
+                 "choosing '-7' will set the epsilon to 1e-7. Choosing '-3' will set the epsilon "
+                 "to 0.001 (1e-3).")
         self.add_item(
             section=section,
             title="reflect_padding",
@@ -148,7 +186,7 @@ class Config(FaceswapConfig):
             datatype=bool,
             default=False,
             group="network",
-            info="R|[Nvidia Only], NVIDIA GPUs can run operations in float16 faster than in "
+            info="[Nvidia Only], NVIDIA GPUs can run operations in float16 faster than in "
                  "float32. Mixed precision allows you to use a mix of float16 with float32, to "
                  "get the performance benefits from float16 and the numeric stability benefits "
                  "from float32.\n\nWhile mixed precision will run on most Nvidia models, it will "
@@ -157,6 +195,17 @@ class Config(FaceswapConfig):
                  "because they have Tensor Cores. Older GPUs offer no math performance benefit "
                  "for using mixed precision, however memory and bandwidth savings can enable some "
                  "speedups. Generally RTX GPUs and later will offer the most benefit.")
+        self.add_item(
+            section=section,
+            title="nan_protection",
+            datatype=bool,
+            default=True,
+            group="network",
+            info="If a 'NaN' is generated in the model, this means that the model has corrupted "
+                 "and the model is likely to start deteriorating from this point on. Enabling NaN "
+                 "protection will stop training immediately in the event of a NaN. The last save "
+                 "will not contain the NaN, so you may still be able to rescue your model.",
+            fixed=False)
         self.add_item(
             section=section,
             title="convert_batchsize",
@@ -185,6 +234,7 @@ class Config(FaceswapConfig):
         L_inf_norm https://medium.com/@montjoile/l0-norm-l1-norm-l2-norm-l-infinity
                    -norm-7a7d18a4f40c
         SSIM http://www.cns.nyu.edu/pub/eero/wang03-reprint.pdf
+        MSSIM https://www.cns.nyu.edu/pub/eero/wang03b.pdf
         GMSD https://arxiv.org/ftp/arxiv/papers/1308/1308.3052.pdf
         """
         logger.debug("Setting Loss config")
@@ -199,16 +249,16 @@ class Config(FaceswapConfig):
             datatype=str,
             group="loss",
             default="ssim",
-            choices=["mae", "mse", "logcosh", "smooth_loss", "l_inf_norm", "ssim", "gmsd",
-                     "pixel_gradient_diff"],
+            choices=["mae", "mse", "logcosh", "smooth_loss", "l_inf_norm", "ssim", "ms_ssim",
+                     "gmsd", "pixel_gradient_diff"],
             info="The loss function to use."
                  "\n\t MAE - Mean absolute error will guide reconstructions of each pixel "
                  "towards its median value in the training dataset. Robust to outliers but as "
                  "a median, it can potentially ignore some infrequent image types in the dataset."
                  "\n\t MSE - Mean squared error will guide reconstructions of each pixel "
                  "towards its average value in the training dataset. As an avg, it will be "
-                 "suspectible to outliers and typically produces slightly blurrier results."
-                 "\n\t LogCosh - log(cosh(x)) acts similiar to MSE for small errors and to "
+                 "susceptible to outliers and typically produces slightly blurrier results."
+                 "\n\t LogCosh - log(cosh(x)) acts similar to MSE for small errors and to "
                  "MAE for large errors. Like MSE, it is very stable and prevents overshoots "
                  "when errors are near zero. Like MAE, it is robust to outliers. NB: Due to a bug "
                  "in PlaidML, this loss does not work on AMD cards."
@@ -220,14 +270,17 @@ class Config(FaceswapConfig):
                  "\n\t SSIM - Structural Similarity Index Metric is a perception-based "
                  "loss that considers changes in texture, luminance, contrast, and local spatial "
                  "statistics of an image. Potentially delivers more realistic looking images."
+                 "\n\t MS_SSIM - Multiscale Structural Similarity Index Metric is similar to SSIM "
+                 "except that it performs the calculations along multiple scales of the input "
+                 "image. NB: This loss currently does not work on AMD Cards."
                  "\n\t GMSD - Gradient Magnitude Similarity Deviation seeks to match "
                  "the global standard deviation of the pixel to pixel differences between two "
-                 "images. Similiar in approach to SSIM. NB: This loss does not currently work on "
+                 "images. Similar in approach to SSIM. NB: This loss does not currently work on "
                  "AMD cards."
                  "\n\t Pixel_Gradient_Difference - Instead of minimizing the difference between "
                  "the absolute value of each pixel in two reference images, compute the pixel to "
                  "pixel spatial difference in each image and then minimize that difference "
-                 "between two images. Allows for large color shifts,but maintains the structure "
+                 "between two images. Allows for large color shifts, but maintains the structure "
                  "of the image.")
         self.add_item(
             section=section,
@@ -241,8 +294,8 @@ class Config(FaceswapConfig):
                  "towards its median value in the training dataset. Robust to outliers but as "
                  "a median, it can potentially ignore some infrequent image types in the dataset."
                  "\n\t MSE - Mean squared error will guide reconstructions of each pixel "
-                 "towards its average value in the training dataset. As an avg, it will be "
-                 "suspectible to outliers and typically produces slightly blurrier results.")
+                 "towards its average value in the training dataset. As an average, it will be "
+                 "susceptible to outliers and typically produces slightly blurrier results.")
         self.add_item(
             section=section,
             title="l2_reg_term",
@@ -255,9 +308,10 @@ class Config(FaceswapConfig):
                  "loss functions.\n\nNB: You should only adjust this if you know what you are "
                  "doing!\n\n"
                  "L2 regularization applies a penalty term to the given Loss function. This "
-                 "penalty will only be applied if SSIM or GMSD is selected for the main loss "
-                 "function, otherwise it is ignored.\n\nThe value given here is as a percentage "
-                 "weight of the main loss function. For example:"
+                 "penalty will only be applied if SSIM, MS-SSIM or GMSD is selected for the main "
+                 "loss function, otherwise it is ignored."
+                 "\n\nThe value given here is as a percentage weight of the main loss function. "
+                 "For example:"
                  "\n\t 100 - Will give equal weighting to the main loss and the penalty function. "
                  "\n\t 25 - Will give the penalty function 1/4 of the weight of the main loss "
                  "function. "
@@ -271,12 +325,14 @@ class Config(FaceswapConfig):
             group="loss",
             min_max=(1, 40),
             rounding=1,
-            default=12,
+            default=3,
+            fixed=False,
             info="The amount of priority to give to the eyes.\n\nThe value given here is as a "
                  "multiplier of the main loss score. For example:"
                  "\n\t 1 - The eyes will receive the same priority as the rest of the face. "
                  "\n\t 10 - The eyes will be given a score 10 times higher than the rest of the "
-                 "face.")
+                 "face."
+                 "\n\nNB: Penalized Mask Loss must be enable to use this option.")
         self.add_item(
             section=section,
             title="mouth_multiplier",
@@ -284,12 +340,14 @@ class Config(FaceswapConfig):
             group="loss",
             min_max=(1, 40),
             rounding=1,
-            default=8,
+            default=2,
+            fixed=False,
             info="The amount of priority to give to the mouth.\n\nThe value given here is as a "
-                 "multiplier of the main loss score. For example:"
+                 "multiplier of the main loss score. For Example:"
                  "\n\t 1 - The mouth will receive the same priority as the rest of the face. "
                  "\n\t 10 - The mouth will be given a score 10 times higher than the rest of the "
-                 "face.")
+                 "face."
+                 "\n\nNB: Penalized Mask Loss must be enable to use this option.")
         self.add_item(
             section=section,
             title="penalized_mask_loss",
@@ -297,7 +355,7 @@ class Config(FaceswapConfig):
             default=True,
             group="loss",
             info="Image loss function is weighted by mask presence. For areas of "
-                 "the image without the facial mask, reconstuction errors will be "
+                 "the image without the facial mask, reconstruction errors will be "
                  "ignored while the masked face area is prioritized. May increase "
                  "overall quality by focusing attention on the core face area.")
         self.add_item(
@@ -305,7 +363,8 @@ class Config(FaceswapConfig):
             title="mask_type",
             datatype=str,
             default="extended",
-            choices=PluginLoader.get_available_extractors("mask", add_none=True),
+            choices=PluginLoader.get_available_extractors("mask",
+                                                          add_none=True, extend_plugin=True),
             group="mask",
             gui_radio=True,
             info="The mask to be used for training. If you have selected 'Learn Mask' or "
@@ -314,6 +373,13 @@ class Config(FaceswapConfig):
                  "exist in the alignments file then it will be generated prior to training "
                  "commencing."
                  "\n\tnone: Don't use a mask."
+                 "\n\tbisenet-fp-face: Relatively lightweight NN based mask that provides more "
+                 "refined control over the area to be masked (configurable in mask settings). "
+                 "Use this version of bisenet-fp if your model is trained with 'face' or "
+                 "'legacy' centering."
+                 "\n\tbisenet-fp-head: Relatively lightweight NN based mask that provides more "
+                 "refined control over the area to be masked (configurable in mask settings). "
+                 "Use this version of bisenet-fp if your model is trained with 'head' centering."
                  "\n\tcomponents: Mask designed to provide facial segmentation based on the "
                  "positioning of landmark locations. A convex hull is constructed around the "
                  "exterior of the landmarks to create a mask."
@@ -363,18 +429,3 @@ class Config(FaceswapConfig):
             info="Dedicate a portion of the model to learning how to duplicate the input "
                  "mask. Increases VRAM usage in exchange for learning a quick ability to try "
                  "to replicate more complex mask models.")
-
-    def load_module(self, filename, module_path, plugin_type):
-        """ Load the defaults module and add defaults """
-        logger.debug("Adding defaults: (filename: %s, module_path: %s, plugin_type: %s",
-                     filename, module_path, plugin_type)
-        module = os.path.splitext(filename)[0]
-        section = ".".join((plugin_type, module.replace("_defaults", "")))
-        logger.debug("Importing defaults module: %s.%s", module_path, module)
-        mod = import_module("{}.{}".format(module_path, module))
-        helptext = mod._HELPTEXT  # pylint:disable=protected-access
-        helptext += ADDITIONAL_INFO if module_path.endswith("model") else ""
-        self.add_section(title=section, info=helptext)
-        for key, val in mod._DEFAULTS.items():  # pylint:disable=protected-access
-            self.add_item(section=section, title=key, **val)
-        logger.debug("Added defaults: %s", section)

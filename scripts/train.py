@@ -10,7 +10,7 @@ from time import sleep
 
 import cv2
 
-from lib.image import read_image
+from lib.image import read_image_meta
 from lib.keypress import KBHit
 from lib.multithreading import MultiThread
 from lib.utils import (get_folder, get_image_paths, FaceswapError, _image_extensions)
@@ -37,65 +37,27 @@ class Train():  # pylint:disable=too-few-public-methods
     def __init__(self, arguments):
         logger.debug("Initializing %s: (args: %s", self.__class__.__name__, arguments)
         self._args = arguments
-        self._timelapse = self._set_timelapse()
+        if self._args.summary:
+            # If just outputting summary we don't need to initialize everything
+            return
+
         self._images = self._get_images()
-        self._gui_preview_trigger = os.path.join(os.path.realpath(os.path.dirname(sys.argv[0])),
-                                                 "lib", "gui", ".cache", ".preview_trigger")
+        self._timelapse = self._set_timelapse()
+        gui_cache = os.path.join(
+            os.path.realpath(os.path.dirname(sys.argv[0])), "lib", "gui", ".cache")
+        self._gui_triggers = dict(update=os.path.join(gui_cache, ".preview_trigger"),
+                                  mask_toggle=os.path.join(gui_cache, ".preview_mask_toggle"))
         self._stop = False
         self._save_now = False
+        self._toggle_preview_mask = False
         self._refresh_preview = False
-        self._preview_buffer = dict()
+        self._preview_buffer = {}
         self._lock = Lock()
 
-        self.trainer_name = self._args.trainer
         logger.debug("Initialized %s", self.__class__.__name__)
 
-    @property
-    def _image_size(self):
-        """ int: The training image size. Reads the first image in the training folder and returns
-        the size. """
-        image = read_image(self._images["a"][0], raise_error=True)
-        size = image.shape[0]
-        logger.debug("Training image size: %s", size)
-        return size
-
-    def _set_timelapse(self):
-        """ Set time-lapse paths if requested.
-
-        Returns
-        -------
-        dict
-            The time-lapse keyword arguments for passing to the trainer
-
-        """
-        if (not self._args.timelapse_input_a and
-                not self._args.timelapse_input_b and
-                not self._args.timelapse_output):
-            return None
-        if (not self._args.timelapse_input_a or
-                not self._args.timelapse_input_b or
-                not self._args.timelapse_output):
-            raise FaceswapError("To enable the timelapse, you have to supply all the parameters "
-                                "(--timelapse-input-A, --timelapse-input-B and "
-                                "--timelapse-output).")
-
-        timelapse_output = str(get_folder(self._args.timelapse_output))
-
-        for folder in (self._args.timelapse_input_a, self._args.timelapse_input_b):
-            if folder is not None and not os.path.isdir(folder):
-                raise FaceswapError("The Timelapse path '{}' does not exist".format(folder))
-            exts = [os.path.splitext(fname)[-1] for fname in os.listdir(folder)]
-            if not any(ext in _image_extensions for ext in exts):
-                raise FaceswapError("The Timelapse path '{}' does not contain any valid "
-                                    "images".format(folder))
-        kwargs = {"input_a": self._args.timelapse_input_a,
-                  "input_b": self._args.timelapse_input_b,
-                  "output": timelapse_output}
-        logger.debug("Timelapse enabled: %s", kwargs)
-        return kwargs
-
     def _get_images(self):
-        """ Check the image folders exist and contains images and obtain image paths.
+        """ Check the image folders exist and contains valid extracted faces. Obtain image paths.
 
         Returns
         -------
@@ -104,20 +66,30 @@ class Train():  # pylint:disable=too-few-public-methods
             for that side.
         """
         logger.debug("Getting image paths")
-        images = dict()
+        images = {}
         for side in ("a", "b"):
-            image_dir = getattr(self._args, "input_{}".format(side))
+            image_dir = getattr(self._args, f"input_{side}")
             if not os.path.isdir(image_dir):
                 logger.error("Error: '%s' does not exist", image_dir)
                 sys.exit(1)
 
-            images[side] = get_image_paths(image_dir)
+            images[side] = get_image_paths(image_dir, ".png")
             if not images[side]:
                 logger.error("Error: '%s' contains no images", image_dir)
                 sys.exit(1)
+            # Validate the first image is a detected face
+            test_image = next(img for img in images[side])
+            meta = read_image_meta(test_image)
+            logger.debug("Test file: (filename: %s, metadata: %s)", test_image, meta)
+            if "itxt" not in meta or "alignments" not in meta["itxt"]:
+                logger.error("The input folder '%s' contains images that are not extracted faces.",
+                             image_dir)
+                logger.error("You can only train a model on faces generated from Faceswap's "
+                             "extract process. Please check your sources and try again.")
+                sys.exit(1)
 
-        logger.info("Model A Directory: %s", self._args.input_a)
-        logger.info("Model B Directory: %s", self._args.input_b)
+            logger.info("Model %s Directory: '%s' (%s images)",
+                        side.upper(), image_dir, len(images[side]))
         logger.debug("Got image paths: %s", [(key, str(len(val)) + " images")
                                              for key, val in images.items()])
         self._validate_image_counts(images)
@@ -152,11 +124,64 @@ class Train():  # pylint:disable=too-few-public-methods
                            "Results are likely to be poor.")
             logger.warning(msg)
 
+    def _set_timelapse(self):
+        """ Set time-lapse paths if requested.
+
+        Returns
+        -------
+        dict
+            The time-lapse keyword arguments for passing to the trainer
+
+        """
+        if (not self._args.timelapse_input_a and
+                not self._args.timelapse_input_b and
+                not self._args.timelapse_output):
+            return None
+        if (not self._args.timelapse_input_a or
+                not self._args.timelapse_input_b or
+                not self._args.timelapse_output):
+            raise FaceswapError("To enable the timelapse, you have to supply all the parameters "
+                                "(--timelapse-input-A, --timelapse-input-B and "
+                                "--timelapse-output).")
+
+        timelapse_output = get_folder(self._args.timelapse_output)
+
+        for side in ("a", "b"):
+            folder = getattr(self._args, f"timelapse_input_{side}")
+            if folder is not None and not os.path.isdir(folder):
+                raise FaceswapError(f"The Timelapse path '{folder}' does not exist")
+
+            training_folder = getattr(self._args, f"input_{side}")
+            if folder == training_folder:
+                continue  # Time-lapse folder is training folder
+
+            filenames = [fname for fname in os.listdir(folder)
+                         if os.path.splitext(fname)[-1].lower() in _image_extensions]
+            if not filenames:
+                raise FaceswapError(f"The Timelapse path '{folder}' does not contain any valid "
+                                    "images")
+
+            # Time-lapse images must appear in the training set, as we need access to alignment and
+            # mask info. Check filenames are there to save failing much later in the process.
+            training_images = [os.path.basename(img) for img in self._images[side]]
+            if not all(img in training_images for img in filenames):
+                raise FaceswapError(f"All images in the Timelapse folder '{folder}' must exist in "
+                                    f"the training folder '{training_folder}'")
+
+        kwargs = {"input_a": self._args.timelapse_input_a,
+                  "input_b": self._args.timelapse_input_b,
+                  "output": timelapse_output}
+        logger.debug("Timelapse enabled: %s", kwargs)
+        return kwargs
+
     def process(self):
         """ The entry point for triggering the Training Process.
 
         Should only be called from  :class:`lib.cli.launcher.ScriptExecutor`
         """
+        if self._args.summary:
+            self._load_model()
+            return
         logger.debug("Starting Training Process")
         logger.info("Training data directory: %s", self._args.model_dir)
         thread = self._start_thread()
@@ -235,11 +260,10 @@ class Train():  # pylint:disable=too-few-public-methods
             The requested model plugin
         """
         logger.debug("Loading Model")
-        model_dir = str(get_folder(self._args.model_dir))
-        model = PluginLoader.get_model(self.trainer_name)(
+        model_dir = get_folder(self._args.model_dir)
+        model = PluginLoader.get_model(self._args.trainer)(
             model_dir,
             self._args,
-            training_image_size=self._image_size,
             predict=False)
         model.build()
         logger.debug("Loaded Model")
@@ -290,6 +314,11 @@ class Train():  # pylint:disable=too-few-public-methods
             logger.trace("Training iteration: %s", iteration)
             save_iteration = iteration % self._args.save_interval == 0 or iteration == 1
 
+            if self._toggle_preview_mask:
+                trainer.toggle_mask()
+                self._toggle_preview_mask = False
+                self._refresh_preview = True
+
             if save_iteration or self._save_now or self._refresh_preview:
                 viewer = display_func
             else:
@@ -301,12 +330,9 @@ class Train():  # pylint:disable=too-few-public-methods
                 break
 
             if self._refresh_preview and viewer is not None:
-                if self._args.redirect_gui:
+                if self._args.redirect_gui:  # Remove any gui trigger files following an update
                     print("\n")
                     logger.info("[Preview Updated]")
-                    if os.path.isfile(self._gui_preview_trigger):
-                        logger.debug("Removing gui trigger file: %s", self._gui_preview_trigger)
-                        os.remove(self._gui_preview_trigger)
                 self._refresh_preview = False
 
             if save_iteration:
@@ -329,27 +355,31 @@ class Train():  # pylint:disable=too-few-public-methods
         bool
             ``True`` if there has been an error in the background thread otherwise ``False``
         """
-        is_preview = self._args.preview
-        preview_trigger_set = False
         logger.debug("Launching Monitor")
         logger.info("===================================================")
         logger.info("  Starting")
-        if is_preview:
+        if self._args.preview:
             logger.info("  Using live preview")
-        logger.info("  Press '%s' to save and quit",
-                    "Stop" if self._args.redirect_gui or self._args.colab else "ENTER")
-        if not self._args.redirect_gui and not self._args.colab:
+        if sys.stdout.isatty():
+            logger.info("  Press '%s' to save and quit",
+                        "Stop" if self._args.redirect_gui or self._args.colab else "ENTER")
+        if not self._args.redirect_gui and not self._args.colab and sys.stdout.isatty():
             logger.info("  Press 'S' to save model weights immediately")
         logger.info("===================================================")
 
         keypress = KBHit(is_gui=self._args.redirect_gui)
+        window_created = False
         err = False
         while True:
             try:
-                if is_preview:
+                if self._args.preview:
                     with self._lock:
                         for name, image in self._preview_buffer.items():
+                            if not window_created:
+                                self._create_resizable_window(name, image.shape)
                             cv2.imshow(name, image)  # pylint: disable=no-member
+                        if not window_created:
+                            window_created = bool(self._preview_buffer)
                     cv_key = cv2.waitKey(1000)  # pylint: disable=no-member
                 else:
                     cv_key = None
@@ -363,17 +393,8 @@ class Train():  # pylint:disable=too-few-public-methods
                     break
 
                 # Preview Monitor
-                if is_preview and (cv_key == ord("\n") or cv_key == ord("\r")):
-                    logger.debug("Exit requested")
+                if not self._preview_monitor(cv_key):
                     break
-                if is_preview and cv_key == ord("s"):
-                    print("\n")
-                    logger.info("Save requested")
-                    self._save_now = True
-                if is_preview and cv_key == ord("r"):
-                    print("\n")
-                    logger.info("Refresh preview requested")
-                    self._refresh_preview = True
 
                 # Console Monitor
                 if keypress.kbhit():
@@ -386,16 +407,7 @@ class Train():  # pylint:disable=too-few-public-methods
                         self._save_now = True
 
                 # GUI Preview trigger update monitor
-                if self._args.redirect_gui:
-                    if not preview_trigger_set and os.path.isfile(self._gui_preview_trigger):
-                        print("\n")
-                        logger.info("Refresh preview requested")
-                        self._refresh_preview = True
-                        preview_trigger_set = True
-
-                    if preview_trigger_set and not self._refresh_preview:
-                        logger.debug("Resetting GUI preview trigger")
-                        preview_trigger_set = False
+                self._process_gui_triggers()
 
                 sleep(1)
             except KeyboardInterrupt:
@@ -404,6 +416,78 @@ class Train():  # pylint:disable=too-few-public-methods
         keypress.set_normal_term()
         logger.debug("Closed Monitor")
         return err
+
+    @classmethod
+    def _create_resizable_window(cls, name: str, image_shape: tuple) -> None:
+        """ Create a resizable OpenCV window to hold the preview image.
+
+        Parameters
+        ----------
+        name: str
+            The name to display in the window header and for window identification
+        shape: tuple
+            The (`rows`, `columns`, `channels`) of the image to be displayed
+        """
+        logger.debug("Creating named window '%s' for image shape %s", name, image_shape)
+        height, width = image_shape[:2]
+        cv2.namedWindow(name, cv2.WINDOW_GUI_EXPANDED)
+        cv2.resizeWindow(name, width, height)
+
+    def _preview_monitor(self, key_press):
+        """ Monitors keyboard presses on the pop-up OpenCV Preview Window.
+
+        Parameters
+        ----------
+        key_press: str
+            The key press received from OpenCV or ``None`` if no press received
+
+        Returns
+        -------
+        bool
+            ``True`` if the process should continue training. ``False`` if an exit has been
+            requested and process should terminate
+        """
+        if not self._args.preview:
+            return True
+
+        if key_press == ord("\n") or key_press == ord("\r"):
+            logger.debug("Exit requested")
+            return False
+
+        if key_press == ord("s"):
+            print("\n")
+            logger.info("Save requested")
+            self._save_now = True
+        if key_press == ord("r"):
+            print("\n")
+            logger.info("Refresh preview requested")
+            self._refresh_preview = True
+        if key_press == ord("m"):
+            print("\n")
+            logger.verbose("Toggle mask display requested")
+            self._toggle_preview_mask = True
+
+        return True
+
+    def _process_gui_triggers(self):
+        """ Check whether a file drop has occurred from the GUI to manually update the preview. """
+        if not self._args.redirect_gui:
+            return
+
+        parent_flags = dict(mask_toggle="_toggle_preview_mask", update="_refresh_preview")
+        for trigger in ("mask_toggle", "update"):
+            filename = self._gui_triggers[trigger]
+            if os.path.isfile(filename):
+                logger.debug("GUI Trigger received for: '%s'", trigger)
+
+                logger.debug("Removing gui trigger file: %s", filename)
+                os.remove(filename)
+
+                if trigger == "update":
+                    print("\n")
+                    logger.info("Refresh preview requested")
+
+                setattr(self, parent_flags[trigger], True)
 
     def _show(self, image, name=""):
         """ Generate the preview and write preview file output.

@@ -73,7 +73,7 @@ class DSSIMObjective():
         self.dim_ordering = K.image_data_format()
 
     @staticmethod
-    def __int_shape(input_tensor):
+    def _int_shape(input_tensor):
         """ Returns the shape of tensor or variable as a tuple of int or None entries.
 
         Parameters
@@ -110,8 +110,8 @@ class DSSIMObjective():
         """
 
         kernel = [self.kernel_size, self.kernel_size]
-        y_true = K.reshape(y_true, [-1] + list(self.__int_shape(y_pred)[1:]))
-        y_pred = K.reshape(y_pred, [-1] + list(self.__int_shape(y_pred)[1:]))
+        y_true = K.reshape(y_true, [-1] + list(self._int_shape(y_pred)[1:]))
+        y_pred = K.reshape(y_pred, [-1] + list(self._int_shape(y_pred)[1:]))
         patches_pred = self.extract_image_patches(y_pred,
                                                   kernel,
                                                   kernel,
@@ -197,6 +197,64 @@ class DSSIMObjective():
             input_tensor = K.permute_dimensions(input_tensor, (0, 2, 3, 1))
         patches = extract_image_patches(input_tensor, kernel, strides, [1, 1, 1, 1], padding)
         return patches
+
+
+class MSSSIMLoss():  # pylint:disable=too-few-public-methods
+    """ Multiscale Structural Similarity Loss Function
+
+    Parameters
+    ----------
+    k_1: float, optional
+        Parameter of the SSIM. Default: `0.01`
+    k_2: float, optional
+        Parameter of the SSIM. Default: `0.03`
+    filter_size: int, optional
+        size of gaussian filter Default: `11`
+    filter_sigma: float, optional
+        Width of gaussian filter Default: `1.5`
+    max_value: float, optional
+        Max value of the output. Default: `1.0`
+    power_factors: tuple, optional
+        Iterable of weights for each of the scales. The number of scales used is the length of the
+        list. Index 0 is the unscaled resolution's weight and each increasing scale corresponds to
+        the image being downsampled by 2. Defaults to the values obtained in the original paper.
+        Default: (0.0448, 0.2856, 0.3001, 0.2363, 0.1333)
+
+    Notes
+    ------
+    You should add a regularization term like a l2 loss in addition to this one.
+    """
+    def __init__(self,
+                 k_1=0.01,
+                 k_2=0.03,
+                 filter_size=4,
+                 filter_sigma=1.5,
+                 max_value=1.0,
+                 power_factors=(0.0448, 0.2856, 0.3001, 0.2363, 0.1333)):
+        self.filter_size = filter_size
+        self.filter_sigma = filter_sigma
+        self.k_1 = k_1
+        self.k_2 = k_2
+        self.max_value = max_value
+        self.power_factors = power_factors
+
+    def __call__(self, y_true, y_pred):
+        """ Call the MS-SSIM Loss Function.
+
+        Parameters
+        ----------
+        y_true: tensor or variable
+            The ground truth value
+        y_pred: tensor or variable
+            The predicted value
+
+        Returns
+        -------
+        tensor
+            The MS-SSIM Loss value
+        """
+        raise FaceswapError("MS-SSIM Loss is not currently compatible with PlaidML. Please select "
+                            "a different Loss method.")
 
 
 class GeneralizedLoss():  # pylint:disable=too-few-public-methods
