@@ -2,15 +2,11 @@
 """ Phaze-A Model by TorzDF with thanks to BirbFakes and the myriad of testers. """
 
 # pylint: disable=too-many-lines
+import logging
 import sys
 from dataclasses import dataclass
 
 from typing import Dict, List, Optional, Tuple, Union
-
-if sys.version_info < (3, 8):
-    from typing_extensions import Literal
-else:
-    from typing import Literal
 
 import numpy as np
 
@@ -22,7 +18,15 @@ from lib.model.normalization import (
     RMSNormalization)
 from lib.utils import get_backend, get_tf_version, FaceswapError
 
-from ._base import KerasModel, ModelBase, logger, _get_all_sub_models
+from ._base import KerasModel, ModelBase, get_all_sub_models
+
+if sys.version_info < (3, 8):
+    from typing_extensions import Literal
+else:
+    from typing import Literal
+
+logger = logging.getLogger(__name__)  # pylint: disable=invalid-name
+
 
 if get_backend() == "amd":
     from keras import applications as kapp, backend as K
@@ -223,7 +227,7 @@ class Model(ModelBase):
                         gblock=self.config["fc_gblock_dropout"])
         logger.debug("Config dropouts: %s", dropouts)
         updated = False
-        for mod in _get_all_sub_models(model):
+        for mod in get_all_sub_models(model):
             if not mod.name.startswith("fc_"):
                 continue
             key = "gblock" if "gblock" in mod.name else mod.name.split("_")[0]
@@ -295,7 +299,7 @@ class Model(ModelBase):
         scaling = self.config["enc_scaling"] / 100
 
         min_size = _MODEL_MAPPING[arch].min_size
-        size = int(max(min_size, min(default_size, ((default_size * scaling) // 16) * 16)))
+        size = int(max(min_size, ((default_size * scaling) // 16) * 16))
 
         if self.config["enc_load_weights"] and enforce_size and scaling != 1.0:
             logger.warning("%s requires input size to be %spx when loading imagenet weights. "
